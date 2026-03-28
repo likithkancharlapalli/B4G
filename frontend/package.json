@@ -8,11 +8,15 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@fontsource/rajdhani": "^5.0.0",
+    "@fontsource/share-tech-mono": "^5.0.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
+    "@supabase/supabase-js": "^2.49.1",
     "recharts": "^2.10.0",
     "lucide-react": "^0.263.1",
-    "leaflet": "^1.9.4"
+    "leaflet": "^1.9.4",
+    "three": "^0.160.0"
   },
   "devDependencies": {
     "@types/react": "^18.2.0",

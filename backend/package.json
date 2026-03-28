@@ -1,0 +1,12 @@
+{
+  "name": "b4g-backend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check:supabase": "node check-supabase.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.1",
+    "dotenv": "^16.4.7"
+  }
+}
