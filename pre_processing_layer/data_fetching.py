@@ -1,6 +1,6 @@
+import json
+import time
 import requests
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
 
 def fetch_box(box):
   s, w, n, e = box
@@ -8,20 +8,22 @@ def fetch_box(box):
   HEADERS = {"User-Agent": "route-project/1.0"}
 
   query = f"""
-  [out:json][timeout:90];
+  [out:json][timeout:120];
   node["harbour"]({s},{w},{n},{e});
   out body;
   """
 
   try:
+    print(f"Fetching box: {box}")
     res = requests.post(
       URL,
-      data={"data": query},
       headers=HEADERS,
-      timeout=120
+      data={"data": query},
+      timeout=150
     )
     res.raise_for_status()
-    return res.json()["elements"]
+    data = res.json()
+    return data["elements"]
   except Exception as e:
     print(f"Error for box {box}: {e}")
     return []
@@ -38,21 +40,38 @@ def dedupe_ports(points):
   return unique
 
 def fetch_ports():
+  # Quarters
   boxes = [
-    [-90, -180, 0, 0],
-    [-90, 0, 0, 180],
-    [0, -180, 90, 0],
-    [0, 0, 90, 180]
+    [-90, -180, 0, 0],   # SW
+    [-90, 0, 0, 180],    # SE
+    [0, -180, 90, 0],    # NW
+    [0, 0, 90, 180]      # NE
   ]
-
   all_points = []
 
-  with ThreadPoolExecutor(max_workers=4) as executor:
-    futures = [executor.submit(fetch_box, box) for box in boxes]
+  for box in boxes:
+    points = fetch_box(box)
+    all_points.extend(points)
+    time.sleep(1)  # Be polite to the API
 
-    for future in as_completed(futures):
-      result = future.result()
-      all_points.extend(result)
+  return dedupe_ports(all_points)
 
-  unique_points = dedupe_ports(all_points)
-  return unique_points
+def main():
+  FETCH_PORTS = True
+  FETCH_ROUTES = True
+  if FETCH_PORTS:
+    try:
+      with open("ports.json", "r") as f:
+        old_ports = json.load(f)
+    except FileNotFoundError:
+      old_ports = []
+    new_ports = fetch_ports()
+    combined_ports = dedupe_ports(old_ports + new_ports)
+    with open("ports.json", "w") as f:
+      json.dump(combined_ports, f, indent=2)
+    print(f"Total unique ports: {len(combined_ports)}")
+  if FETCH_ROUTES:
+    pass
+
+if __name__ == "__main__":
+  main()
