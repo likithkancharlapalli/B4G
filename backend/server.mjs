@@ -99,6 +99,18 @@ function normalizeRoutePoint(point, sourceSrid) {
 function normalizeRoute(row) {
   const sourceSrid = Number(row.source_srid ?? 3857);
   const geometry = Array.isArray(row.geometry) ? row.geometry : [];
+  const originName =
+    row.origin_port_name ??
+    row.originPortName ??
+    row.origin_port?.name ??
+    row.originPort?.name ??
+    null;
+  const destName =
+    row.dest_port_name ??
+    row.destPortName ??
+    row.dest_port?.name ??
+    row.destPort?.name ??
+    null;
   const points = geometry
     .map((point) => normalizeRoutePoint(point, sourceSrid))
     .filter((point) => {
@@ -118,8 +130,34 @@ function normalizeRoute(row) {
     laneId: row.lane_id,
     laneType: row.lane_type,
     distanceKm: Number(row.distance_km ?? 0),
+    originPortName: originName,
+    destPortName: destName,
+    routeName:
+      originName && destName
+        ? `${originName} -> ${destName}`
+        : `Route ${row.lane_id}-${row.id}`,
     points,
   };
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function computeRouteRiskPercentage(route, maxDistanceKm) {
+  const laneBaseRisk = {
+    Major: 58,
+    Intermediate: 44,
+    Minor: 32,
+  };
+
+  const base = laneBaseRisk[route.laneType] ?? 40;
+  const distanceRatio =
+    maxDistanceKm > 0 ? clamp(route.distanceKm / maxDistanceKm, 0, 1) : 0;
+  const distanceComponent = distanceRatio * 30;
+  const complexityComponent = clamp((route.points.length - 2) * 0.25, 0, 12);
+
+  return clamp(Math.round(base + distanceComponent + complexityComponent), 1, 99);
 }
 
 app.get("/health", (_, res) => {
@@ -222,7 +260,7 @@ app.get("/api/routes", async (_, res) => {
     const to = from + pageSize - 1;
     const { data, error } = await supabase
       .from(routesTable)
-      .select("id,lane_id,lane_type,distance_km,geometry,source_srid")
+      .select("id,lane_id,lane_type,distance_km,geometry,source_srid,origin_port_name,dest_port_name,origin_port,dest_port")
       .order("id")
       .range(from, to);
 
@@ -243,7 +281,17 @@ app.get("/api/routes", async (_, res) => {
     .map(normalizeRoute)
     .filter((route) => Array.isArray(route.points) && route.points.length >= 2);
 
-  return res.json(routes);
+  const maxDistanceKm = routes.reduce(
+    (max, route) => Math.max(max, route.distanceKm || 0),
+    0,
+  );
+
+  const routesWithRisk = routes.map((route) => ({
+    ...route,
+    riskPercentage: computeRouteRiskPercentage(route, maxDistanceKm),
+  }));
+
+  return res.json(routesWithRisk);
 });
 
 app.listen(port, () => {

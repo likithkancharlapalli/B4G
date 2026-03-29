@@ -33,6 +33,7 @@ const TIER_COLOR = { red: T.red, yellow: T.yellow, green: T.green };
 const TIER_LABEL = { red: "Critical", yellow: "Caution", green: "Stable" };
 const ROUTE_BASE_HUE = { Major: 38, Intermediate: 202, Minor: 132 };
 const ROUTE_LANE_COLOR = { Major: "#ffc54d", Intermediate: "#5ec2ff", Minor: "#8fff9f" };
+const ROUTES_PAGE_SIZE = 9;
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 
@@ -84,12 +85,15 @@ function routeAltitude(route) {
 
 // ─── GLOBE ───────────────────────────────────────────────────────────────────
 
-function GlobeScene({ vendors, ports, routes, routeColorMode, selectedVendor, onSelectVendor }) {
+function GlobeScene({ vendors, ports, routes, routeColorMode, selectedVendor, selectedRoute, onSelectVendor }) {
   const mountRef = useRef(null);
   const animFrameRef = useRef(null);
   const isDragging = useRef(false);
   const prevMouse = useRef({ x: 0, y: 0 });
   const autoRotate = useRef(true);
+  const focusTimeoutRef = useRef(null);
+  const globeRef = useRef(null);
+  const targetRotationRef = useRef({ x: null, y: null });
   const markerMeshes = useRef([]);
 
   useEffect(() => {
@@ -121,6 +125,7 @@ function GlobeScene({ vendors, ports, routes, routeColorMode, selectedVendor, on
     const bumpTex = loader.load("https://unpkg.com/three-globe/example/img/earth-topology.png");
     const globeMat = new THREE.MeshPhongMaterial({ map: earthTex, bumpMap: bumpTex, bumpScale: 0.008, specular: new THREE.Color(0x443322), shininess: 12 });
     const globe = new THREE.Mesh(globeGeo, globeMat);
+    globeRef.current = globe;
     scene.add(globe);
 
     // Warm-tinted grid
@@ -146,7 +151,11 @@ function GlobeScene({ vendors, ports, routes, routeColorMode, selectedVendor, on
     hqMesh.position.copy(hqPos);
     globe.add(hqMesh);
 
-    routes.forEach((route) => {
+    const visibleRoutes = selectedRoute
+      ? routes.filter((route) => route.id === selectedRoute.id)
+      : routes;
+
+    visibleRoutes.forEach((route) => {
       const altitude = routeAltitude(route);
       const points = Array.isArray(route.points)
         ? route.points
@@ -159,7 +168,7 @@ function GlobeScene({ vendors, ports, routes, routeColorMode, selectedVendor, on
         color: routeColor(route, routeColorMode),
         transparent: true,
         opacity: 0.88,
-        depthTest: false,
+        depthTest: true,
       });
       const routeLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), routeMat);
       routeLine.renderOrder = 3;
@@ -182,7 +191,7 @@ function GlobeScene({ vendors, ports, routes, routeColorMode, selectedVendor, on
           size: 0.012,
           transparent: true,
           opacity: 0.98,
-          depthTest: false,
+          depthTest: true,
           sizeAttenuation: true,
         });
         const portCloud = new THREE.Points(portGeometry, portMaterial);
@@ -255,7 +264,19 @@ function GlobeScene({ vendors, ports, routes, routeColorMode, selectedVendor, on
 
     const animate = () => {
       animFrameRef.current = requestAnimationFrame(animate);
-      if (autoRotate.current) globe.rotation.y += 0.0015;
+      const target = targetRotationRef.current;
+      if (target.y !== null && target.x !== null) {
+        globe.rotation.y += (target.y - globe.rotation.y) * 0.09;
+        globe.rotation.x += (target.x - globe.rotation.x) * 0.09;
+        if (
+          Math.abs(target.y - globe.rotation.y) < 0.002 &&
+          Math.abs(target.x - globe.rotation.x) < 0.002
+        ) {
+          targetRotationRef.current = { x: null, y: null };
+        }
+      } else if (autoRotate.current) {
+        globe.rotation.y += 0.0015;
+      }
       globe.children.forEach(c => {
         if (c.userData.ring) {
           c.userData.phase = (c.userData.phase || 0) + 0.04;
@@ -274,9 +295,11 @@ function GlobeScene({ vendors, ports, routes, routeColorMode, selectedVendor, on
       el.removeEventListener("mouseup", onMouseUp);
       window.removeEventListener("resize", onResize);
       renderer.dispose();
+      globeRef.current = null;
+      if (focusTimeoutRef.current) clearTimeout(focusTimeoutRef.current);
       if (el.contains(renderer.domElement)) el.removeChild(renderer.domElement);
     };
-  }, [vendors, ports, routes, routeColorMode, onSelectVendor]);
+  }, [vendors, ports, routes, routeColorMode, selectedRoute, onSelectVendor]);
 
   useEffect(() => {
     markerMeshes.current.forEach(m => {
@@ -286,6 +309,41 @@ function GlobeScene({ vendors, ports, routes, routeColorMode, selectedVendor, on
       m.scale.setScalar(selectedVendor === v.id ? 1.9 : 1);
     });
   }, [selectedVendor, vendors]);
+
+  useEffect(() => {
+    if (!selectedRoute) {
+      targetRotationRef.current = { x: null, y: null };
+      if (focusTimeoutRef.current) clearTimeout(focusTimeoutRef.current);
+      autoRotate.current = true;
+      return;
+    }
+
+    if (!Array.isArray(selectedRoute.points) || selectedRoute.points.length === 0) {
+      return;
+    }
+    const globe = globeRef.current;
+    if (!globe) return;
+
+    const midPoint = selectedRoute.points[Math.floor(selectedRoute.points.length / 2)];
+    const lat = Number(midPoint?.lat);
+    const lng = Number(midPoint?.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+    const desiredY = -((lng + 90) * Math.PI) / 180;
+    const pointVec = latLngToVec3(lat, lng, 1);
+    const alignToFront = pointVec.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), desiredY);
+    const desiredX = Math.max(
+      -Math.PI / 2.5,
+      Math.min(Math.PI / 2.5, Math.atan2(alignToFront.y, alignToFront.z)),
+    );
+
+    targetRotationRef.current = { x: desiredX, y: desiredY };
+    autoRotate.current = false;
+    if (focusTimeoutRef.current) clearTimeout(focusTimeoutRef.current);
+    focusTimeoutRef.current = setTimeout(() => {
+      autoRotate.current = true;
+    }, 5000);
+  }, [selectedRoute]);
 
   return <div ref={mountRef} className="w-full h-full cursor-grab active:cursor-grabbing" />;
 }
@@ -420,6 +478,8 @@ export default function App() {
   const [alerts, setAlerts] = useState([]);
   const [ports, setPorts] = useState([]);
   const [routes, setRoutes] = useState([]);
+  const [selectedRouteId, setSelectedRouteId] = useState(null);
+  const [routePage, setRoutePage] = useState(0);
   const [routeColorMode, setRouteColorMode] = useState("distinct");
   const [apiConnected, setApiConnected] = useState(false);
   const [selectedVendor, setSelectedVendor] = useState(null);
@@ -508,6 +568,25 @@ export default function App() {
     .filter((v) => v.tier === "red")
     .reduce((a, v) => a + v.costDelta * 80000, 0);
   const selV = vendors.find((v) => v.id === selectedVendor);
+  const selectedRoute = routes.find((route) => route.id === selectedRouteId) || null;
+  const routesByRisk = [...routes].sort(
+    (a, b) => (b.riskPercentage ?? -1) - (a.riskPercentage ?? -1),
+  );
+  const totalRoutePages = Math.max(
+    1,
+    Math.ceil(routesByRisk.length / ROUTES_PAGE_SIZE),
+  );
+  const currentRoutePage = Math.min(routePage, totalRoutePages - 1);
+  const routeStartIndex = currentRoutePage * ROUTES_PAGE_SIZE;
+  const routeEndIndex = Math.min(
+    routeStartIndex + ROUTES_PAGE_SIZE,
+    routesByRisk.length,
+  );
+  const pagedRoutes = routesByRisk.slice(routeStartIndex, routeEndIndex);
+
+  useEffect(() => {
+    setRoutePage((p) => Math.min(p, totalRoutePages - 1));
+  }, [totalRoutePages]);
 
   return (
     <div className="min-h-screen flex flex-col" style={{ background: T.bg, fontFamily: "'Rajdhani', 'Segoe UI', sans-serif", color: T.text }}>
@@ -596,19 +675,88 @@ export default function App() {
           {/* Routes */}
           {activeTab === "routes" && (
             <div className="flex-1 overflow-y-auto">
-              {vendors.map(v => (
-                <div key={v.id} onClick={() => setSelectedVendor(v.id)} className="flex items-center gap-2.5 px-3 py-2.5 cursor-pointer transition-all" style={{ borderBottom: `1px solid ${T.border}`, background: selectedVendor === v.id ? T.goldFaint : "transparent" }}>
-                  <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: TIER_COLOR[v.tier] }} />
-                  <div className="flex-1 min-w-0">
-                    <div className="text-xs font-semibold truncate" style={{ color: selectedVendor === v.id ? T.gold : T.text }}>{v.name}</div>
-                    <div className="text-xs truncate" style={{ color: T.textDim }}>{v.country} · {v.material}</div>
-                  </div>
-                  <div className="text-right flex-shrink-0">
-                    <div className="text-xs font-bold mono" style={{ color: TIER_COLOR[v.tier] }}>{v.risk}</div>
-                    <div className="text-xs mono" style={{ color: T.textDim }}>{v.leadTime}d</div>
-                  </div>
+              <div
+                className="px-3 py-2 flex items-center justify-between sticky top-0 z-10"
+                style={{ background: T.surface, borderBottom: `1px solid ${T.border}` }}
+              >
+                <span className="text-xs mono" style={{ color: T.textDim }}>
+                  {routesByRisk.length === 0
+                    ? "0 routes"
+                    : `${routeStartIndex + 1}-${routeEndIndex} of ${routesByRisk.length}`}
+                </span>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setRoutePage((p) => Math.max(0, p - 1))}
+                    disabled={currentRoutePage === 0}
+                    className="px-2 py-0.5 text-xs rounded"
+                    style={{
+                      color: currentRoutePage === 0 ? T.textDim : T.text,
+                      border: `1px solid ${T.border}`,
+                      opacity: currentRoutePage === 0 ? 0.45 : 1,
+                    }}
+                  >
+                    Prev
+                  </button>
+                  <button
+                    onClick={() =>
+                      setRoutePage((p) => Math.min(totalRoutePages - 1, p + 1))
+                    }
+                    disabled={currentRoutePage >= totalRoutePages - 1}
+                    className="px-2 py-0.5 text-xs rounded"
+                    style={{
+                      color: currentRoutePage >= totalRoutePages - 1 ? T.textDim : T.text,
+                      border: `1px solid ${T.border}`,
+                      opacity: currentRoutePage >= totalRoutePages - 1 ? 0.45 : 1,
+                    }}
+                  >
+                    Next
+                  </button>
                 </div>
-              ))}
+              </div>
+              {pagedRoutes.map((route) => {
+                const risk = Number.isFinite(route.riskPercentage)
+                  ? route.riskPercentage
+                  : null;
+                const riskColor = risk === null
+                  ? T.textDim
+                  : risk >= 70
+                    ? T.red
+                    : risk >= 40
+                      ? T.yellow
+                      : T.green;
+
+                return (
+                  <div
+                    key={route.id}
+                    onClick={() =>
+                      setSelectedRouteId((prev) =>
+                        prev === route.id ? null : route.id,
+                      )
+                    }
+                    className="flex items-center gap-2.5 px-3 py-2.5 cursor-pointer transition-all"
+                    style={{
+                      borderBottom: `1px solid ${T.border}`,
+                      background: selectedRouteId === route.id ? T.goldFaint : "transparent",
+                    }}
+                  >
+                    <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: riskColor }} />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-semibold truncate" style={{ color: selectedRouteId === route.id ? T.gold : T.text }}>
+                        {route.routeName ?? `Route ${route.laneId}-${route.id}`}
+                      </div>
+                      <div className="text-xs truncate" style={{ color: T.textDim }}>
+                        {route.laneType} · {Number(route.distanceKm ?? 0).toFixed(1)} km
+                      </div>
+                    </div>
+                    <div className="text-right flex-shrink-0">
+                      <div className="text-xs font-bold mono" style={{ color: riskColor }}>
+                        {risk === null ? "N/A" : `${risk}%`}
+                      </div>
+                      <div className="text-xs mono" style={{ color: T.textDim }}>risk</div>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
 
@@ -673,6 +821,7 @@ export default function App() {
             routes={routes}
             routeColorMode={routeColorMode}
             selectedVendor={selectedVendor}
+            selectedRoute={selectedRoute}
             onSelectVendor={handleSelectVendor}
           />
 
