@@ -16,6 +16,7 @@ const supabaseKey =
 const vendorsTable = process.env.SUPABASE_VENDORS_TABLE?.trim() || "vendors";
 const alertsTable = process.env.SUPABASE_ALERTS_TABLE?.trim() || "alerts";
 const portsTable = process.env.SUPABASE_PORTS_TABLE?.trim() || "ports";
+const routesTable = process.env.SUPABASE_ROUTES_TABLE?.trim() || "routes";
 
 if (!supabaseUrl || !supabaseKey) {
   console.error(
@@ -63,6 +64,61 @@ function normalizePort(row) {
     lng: row.lon ?? row.lng,
     harbour: row.harbour ?? "yes",
     seamarkType: row.seamark_type ?? row.seamarkType ?? null,
+  };
+}
+
+function mercatorToLngLat(x, y) {
+  const originShift = 20037508.34;
+  const lng = (x / originShift) * 180;
+  let lat = (y / originShift) * 180;
+  lat =
+    (180 / Math.PI) *
+    (2 * Math.atan(Math.exp((lat * Math.PI) / 180)) - Math.PI / 2);
+  return { lng, lat };
+}
+
+function normalizeRoutePoint(point, sourceSrid) {
+  const x = Number(point?.lon ?? point?.x);
+  const y = Number(point?.lat ?? point?.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+
+  if (sourceSrid === 3857) {
+    const converted = mercatorToLngLat(x, y);
+    return {
+      lng: converted.lng,
+      lat: Math.max(-85.0511, Math.min(85.0511, converted.lat)),
+    };
+  }
+
+  return {
+    lng: x,
+    lat: y,
+  };
+}
+
+function normalizeRoute(row) {
+  const sourceSrid = Number(row.source_srid ?? 3857);
+  const geometry = Array.isArray(row.geometry) ? row.geometry : [];
+  const points = geometry
+    .map((point) => normalizeRoutePoint(point, sourceSrid))
+    .filter((point) => {
+      if (!point) return false;
+      return (
+        Number.isFinite(point.lat) &&
+        Number.isFinite(point.lng) &&
+        point.lat >= -90 &&
+        point.lat <= 90 &&
+        point.lng >= -180 &&
+        point.lng <= 180
+      );
+    });
+
+  return {
+    id: row.id,
+    laneId: row.lane_id,
+    laneType: row.lane_type,
+    distanceKm: Number(row.distance_km ?? 0),
+    points,
   };
 }
 
@@ -155,6 +211,39 @@ app.get("/api/ports", async (_, res) => {
     .filter((port) => Number.isFinite(port.lat) && Number.isFinite(port.lng));
 
   return res.json(ports);
+});
+
+app.get("/api/routes", async (_, res) => {
+  const pageSize = 1000;
+  const allRows = [];
+  let from = 0;
+
+  while (true) {
+    const to = from + pageSize - 1;
+    const { data, error } = await supabase
+      .from(routesTable)
+      .select("id,lane_id,lane_type,distance_km,geometry,source_srid")
+      .order("id")
+      .range(from, to);
+
+    if (error) {
+      return res.status(500).json({
+        message: "Failed to fetch routes from Supabase",
+        details: error.message,
+      });
+    }
+
+    const batch = data ?? [];
+    allRows.push(...batch);
+    if (batch.length < pageSize) break;
+    from += pageSize;
+  }
+
+  const routes = allRows
+    .map(normalizeRoute)
+    .filter((route) => Array.isArray(route.points) && route.points.length >= 2);
+
+  return res.json(routes);
 });
 
 app.listen(port, () => {

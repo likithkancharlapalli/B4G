@@ -4,36 +4,11 @@ import "@fontsource/rajdhani/700.css";
 import "@fontsource/share-tech-mono/400.css";
 import * as THREE from "three";
 import { AlertTriangle, Bell, ChevronRight, X, TrendingUp, Clock, DollarSign, Globe, BarChart2, Zap, RefreshCw, Radio, Shield } from "lucide-react";
-import { getAlerts, getPorts, getVendors } from "./lib/api";
+import { getAlerts, getPorts, getRoutes, getVendors } from "./lib/api";
 
 // ─── DATA ────────────────────────────────────────────────────────────────────
 
 const HQ = { name: "HQ — New York", lat: 40.7128, lng: -74.006 };
-
-const FALLBACK_VENDORS = [
-  { id: 1, name: "PetroSource Iran", country: "Iran", flag: "🇮🇷", lat: 35.6892, lng: 51.389, material: "Petrochemicals", risk: 91, leadTime: 48, costDelta: +22, status: "Critical", tier: "red", alternatives: [2, 7] },
-  { id: 2, name: "SinoEarth Shenzhen", country: "China", flag: "🇨🇳", lat: 22.5431, lng: 114.0579, material: "Rare Earth Metals", risk: 64, leadTime: 28, costDelta: +8, status: "Caution", tier: "yellow", alternatives: [6, 8] },
-  { id: 3, name: "TaiwanChip Hsinchu", country: "Taiwan", flag: "🇹🇼", lat: 24.8138, lng: 120.9675, material: "Semiconductors", risk: 58, leadTime: 21, costDelta: +5, status: "Watch", tier: "yellow", alternatives: [6, 2] },
-  { id: 4, name: "DhakaThread Co.", country: "Bangladesh", flag: "🇧🇩", lat: 23.8103, lng: 90.4125, material: "Textiles", risk: 24, leadTime: 18, costDelta: -3, status: "Stable", tier: "green", alternatives: [] },
-  { id: 5, name: "KharkivSteel UA", country: "Ukraine", flag: "🇺🇦", lat: 49.9935, lng: 36.2304, material: "Steel", risk: 88, leadTime: 62, costDelta: +31, status: "Critical", tier: "red", alternatives: [9, 10] },
-  { id: 6, name: "SeoulTech Korea", country: "South Korea", flag: "🇰🇷", lat: 37.5665, lng: 126.978, material: "Electronics", risk: 18, leadTime: 14, costDelta: -1, status: "Stable", tier: "green", alternatives: [] },
-  { id: 7, name: "AntoLithium Chile", country: "Chile", flag: "🇨🇱", lat: -23.6509, lng: -70.3975, material: "Lithium", risk: 15, leadTime: 22, costDelta: -5, status: "Stable", tier: "green", alternatives: [] },
-  { id: 8, name: "VanForest Canada", country: "Canada", flag: "🇨🇦", lat: 49.2827, lng: -123.1207, material: "Timber", risk: 9, leadTime: 10, costDelta: -8, status: "Stable", tier: "green", alternatives: [] },
-];
-
-const ALT_VENDORS = {
-  9: { name: "TataSteelworks India", country: "India", flag: "🇮🇳", material: "Steel", risk: 29, leadTime: 24, costDelta: +4 },
-  10: { name: "CSN Brazil Steel", country: "Brazil", flag: "🇧🇷", material: "Steel", risk: 22, leadTime: 31, costDelta: +2 },
-};
-
-const FALLBACK_ALERTS = [
-  { id: 1, vendorId: 1, tier: "red", region: "Iran", msg: "Strait of Hormuz delays — est. +18 day lead time impact", time: "2h ago" },
-  { id: 2, vendorId: 5, tier: "red", region: "Ukraine", msg: "Kharkiv plant operations suspended indefinitely", time: "5h ago" },
-  { id: 3, vendorId: 2, tier: "yellow", region: "China", msg: "Rare earth export licensing reviews underway", time: "1d ago" },
-  { id: 4, vendorId: 3, tier: "yellow", region: "Taiwan", msg: "Regional military monitoring elevated", time: "1d ago" },
-  { id: 5, vendorId: 7, tier: "green", region: "Chile", msg: "Q3 lithium quotas confirmed stable", time: "2d ago" },
-  { id: 6, vendorId: 8, tier: "green", region: "Canada", msg: "No disruptions — exports proceeding normally", time: "3d ago" },
-];
 
 // ─── THEME ───────────────────────────────────────────────────────────────────
 
@@ -56,6 +31,8 @@ const T = {
 
 const TIER_COLOR = { red: T.red, yellow: T.yellow, green: T.green };
 const TIER_LABEL = { red: "Critical", yellow: "Caution", green: "Stable" };
+const ROUTE_BASE_HUE = { Major: 38, Intermediate: 202, Minor: 132 };
+const ROUTE_LANE_COLOR = { Major: "#ffc54d", Intermediate: "#5ec2ff", Minor: "#8fff9f" };
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 
@@ -82,9 +59,32 @@ function createArcPoints(latA, lngA, latB, lngB, segments = 80, lift = 0.35) {
   return points;
 }
 
+function routeSeed(route) {
+  const idSeed = Number(route.id ?? route.laneId ?? 0);
+  const distanceSeed = Math.round(Number(route.distanceKm ?? 0) * 10);
+  return Math.abs(idSeed * 131 + distanceSeed * 17 + 97);
+}
+
+function routeColor(route, mode) {
+  if (mode === "lane") {
+    return new THREE.Color(ROUTE_LANE_COLOR[route.laneType] ?? ROUTE_LANE_COLOR.Major);
+  }
+  const seed = routeSeed(route);
+  const baseHue = ROUTE_BASE_HUE[route.laneType] ?? 38;
+  const hue = (baseHue + (seed % 90) - 45 + 360) % 360;
+  const saturation = 78 - (seed % 10);
+  const lightness = 62 - (seed % 14);
+  return new THREE.Color(`hsl(${hue}, ${saturation}%, ${lightness}%)`);
+}
+
+function routeAltitude(route) {
+  const seed = routeSeed(route);
+  return 1.013 + (seed % 7) * 0.0032;
+}
+
 // ─── GLOBE ───────────────────────────────────────────────────────────────────
 
-function GlobeScene({ vendors, ports, selectedVendor, onSelectVendor }) {
+function GlobeScene({ vendors, ports, routes, routeColorMode, selectedVendor, onSelectVendor }) {
   const mountRef = useRef(null);
   const animFrameRef = useRef(null);
   const isDragging = useRef(false);
@@ -97,9 +97,10 @@ function GlobeScene({ vendors, ports, selectedVendor, onSelectVendor }) {
     if (!el) return;
     const W = el.clientWidth, H = el.clientHeight;
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     renderer.setSize(W, H);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(T.bg, 1);
     el.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
@@ -145,6 +146,26 @@ function GlobeScene({ vendors, ports, selectedVendor, onSelectVendor }) {
     hqMesh.position.copy(hqPos);
     globe.add(hqMesh);
 
+    routes.forEach((route) => {
+      const altitude = routeAltitude(route);
+      const points = Array.isArray(route.points)
+        ? route.points
+            .map((point) => latLngToVec3(point.lat, point.lng, altitude))
+            .filter(Boolean)
+        : [];
+      if (points.length < 2) return;
+
+      const routeMat = new THREE.LineBasicMaterial({
+        color: routeColor(route, routeColorMode),
+        transparent: true,
+        opacity: 0.88,
+        depthTest: false,
+      });
+      const routeLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), routeMat);
+      routeLine.renderOrder = 3;
+      globe.add(routeLine);
+    });
+
     // Ports cloud (lightweight points for thousands of records)
     if (ports.length > 0) {
       const coords = [];
@@ -157,12 +178,16 @@ function GlobeScene({ vendors, ports, selectedVendor, onSelectVendor }) {
         const portGeometry = new THREE.BufferGeometry();
         portGeometry.setAttribute("position", new THREE.Float32BufferAttribute(coords, 3));
         const portMaterial = new THREE.PointsMaterial({
-          color: 0xd4a030,
-          size: 0.006,
+          color: 0xffde7a,
+          size: 0.012,
           transparent: true,
-          opacity: 0.65,
+          opacity: 0.98,
+          depthTest: false,
+          sizeAttenuation: true,
         });
-        globe.add(new THREE.Points(portGeometry, portMaterial));
+        const portCloud = new THREE.Points(portGeometry, portMaterial);
+        portCloud.renderOrder = 4;
+        globe.add(portCloud);
       }
     }
 
@@ -251,7 +276,7 @@ function GlobeScene({ vendors, ports, selectedVendor, onSelectVendor }) {
       renderer.dispose();
       if (el.contains(renderer.domElement)) el.removeChild(renderer.domElement);
     };
-  }, [vendors, ports, onSelectVendor]);
+  }, [vendors, ports, routes, routeColorMode, onSelectVendor]);
 
   useEffect(() => {
     markerMeshes.current.forEach(m => {
@@ -294,7 +319,10 @@ function TierBadge({ tier }) {
 
 function VendorDrawer({ vendor, onClose }) {
   if (!vendor) return null;
-  const altList = (vendor.alternatives || []).map(id => ALT_VENDORS[id]).filter(Boolean).sort((a, b) => a.risk - b.risk);
+  const altList = (Array.isArray(vendor.alternatives) ? vendor.alternatives : [])
+    .map((alt) => (typeof alt === "object" && alt ? alt : null))
+    .filter(Boolean)
+    .sort((a, b) => (a.risk ?? 0) - (b.risk ?? 0));
   const best = altList[0];
 
   return (
@@ -388,9 +416,11 @@ function VendorDrawer({ vendor, onClose }) {
 // ─── MAIN APP ────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [vendors, setVendors] = useState(FALLBACK_VENDORS);
-  const [alerts, setAlerts] = useState(FALLBACK_ALERTS);
+  const [vendors, setVendors] = useState([]);
+  const [alerts, setAlerts] = useState([]);
   const [ports, setPorts] = useState([]);
+  const [routes, setRoutes] = useState([]);
+  const [routeColorMode, setRouteColorMode] = useState("distinct");
   const [apiConnected, setApiConnected] = useState(false);
   const [selectedVendor, setSelectedVendor] = useState(null);
   const [drawerVendor, setDrawerVendor] = useState(null);
@@ -401,10 +431,11 @@ export default function App() {
 
     async function loadFromApi() {
       try {
-        const [vendorsResult, alertsResult, portsResult] = await Promise.allSettled([
+        const [vendorsResult, alertsResult, portsResult, routesResult] = await Promise.allSettled([
           getVendors(),
           getAlerts(),
           getPorts(),
+          getRoutes(),
         ]);
 
         if (!alive) return;
@@ -412,20 +443,20 @@ export default function App() {
 
         if (vendorsResult.status === "fulfilled") {
           successfulCalls += 1;
-          if (Array.isArray(vendorsResult.value) && vendorsResult.value.length > 0) {
+          if (Array.isArray(vendorsResult.value)) {
             setVendors(vendorsResult.value);
           }
         } else {
-          console.warn("[API] Vendors unavailable, using fallback vendors:", vendorsResult.reason);
+          console.warn("[API] Vendors unavailable:", vendorsResult.reason);
         }
 
         if (alertsResult.status === "fulfilled") {
           successfulCalls += 1;
-          if (Array.isArray(alertsResult.value) && alertsResult.value.length > 0) {
+          if (Array.isArray(alertsResult.value)) {
             setAlerts(alertsResult.value);
           }
         } else {
-          console.warn("[API] Alerts unavailable, using fallback alerts:", alertsResult.reason);
+          console.warn("[API] Alerts unavailable:", alertsResult.reason);
         }
 
         if (portsResult.status === "fulfilled") {
@@ -437,11 +468,20 @@ export default function App() {
           console.warn("[API] Ports unavailable:", portsResult.reason);
         }
 
+        if (routesResult.status === "fulfilled") {
+          successfulCalls += 1;
+          if (Array.isArray(routesResult.value)) {
+            setRoutes(routesResult.value);
+          }
+        } else {
+          console.warn("[API] Routes unavailable:", routesResult.reason);
+        }
+
         setApiConnected(successfulCalls > 0);
       } catch (error) {
         if (alive) {
           setApiConnected(false);
-          console.warn("[API] Using fallback data:", error);
+          console.warn("[API] Failed to load data:", error);
         }
       }
     }
@@ -506,12 +546,16 @@ export default function App() {
           <div className="flex items-center gap-1.5 px-2 py-1 rounded" style={{ background: T.goldFaint, border: `1px solid ${T.border}` }}>
             <div className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: apiConnected ? T.green : T.yellow }} />
             <span className="text-xs mono" style={{ color: apiConnected ? T.green : T.yellow }}>
-              {apiConnected ? "API LIVE" : "FALLBACK"}
+              {apiConnected ? "API LIVE" : "API OFFLINE"}
             </span>
           </div>
           <button className="relative p-1.5 rounded hover:bg-white/5 transition-all">
             <Bell size={16} style={{ color: T.textDim }} />
-            <span className="absolute top-0.5 right-0.5 w-3.5 h-3.5 rounded-full text-white text-[9px] flex items-center justify-center font-bold" style={{ background: T.red }}>3</span>
+            {alerts.length > 0 && (
+              <span className="absolute top-0.5 right-0.5 w-3.5 h-3.5 rounded-full text-white text-[9px] flex items-center justify-center font-bold" style={{ background: T.red }}>
+                {Math.min(alerts.length, 9)}
+              </span>
+            )}
           </button>
           <div className="w-7 h-7 rounded font-bold text-xs flex items-center justify-center" style={{ background: T.goldFaint, color: T.gold, border: `1px solid ${T.border}` }}>JD</div>
         </div>
@@ -522,8 +566,8 @@ export default function App() {
         {[
           { label: "Active Vendors",   value: vendors.length,                          icon: <Globe size={14} />,       color: T.gold, sub: "across 8 regions" },
           { label: "Critical Routes",  value: criticalCount,                           icon: <AlertTriangle size={14}/>, color: T.red,  sub: `${cautionCount} on watch` },
-          { label: "Lead Variance",    value: "+12%",                                  icon: <TrendingUp size={14} />,   color: T.yellow,sub: "vs last quarter" },
-          { label: "Cost Exposure",    value: `$${(totalExposure/1000000).toFixed(1)}M`,icon: <DollarSign size={14}/>,   color: T.red,  sub: "disrupted routes" },
+          { label: "Active Routes",    value: routes.length,                            icon: <TrendingUp size={14} />,   color: T.yellow,sub: "tracked lanes" },
+          { label: "Cost Exposure",    value: `$${(totalExposure/1000000).toFixed(1)}M`,icon: <DollarSign size={14}/>,   color: T.red,  sub: "from vendor risks" },
         ].map((k, i) => (
           <div key={k.label} className="flex items-center gap-3 px-5 py-3" style={{ borderRight: i < 3 ? `1px solid ${T.border}` : "none" }}>
             <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{ color: k.color, background: `${k.color}15` }}>{k.icon}</div>
@@ -600,40 +644,67 @@ export default function App() {
             </div>
           )}
 
-          {/* Steel comparison pinned at bottom */}
+          {/* Network stats pinned at bottom */}
           <div className="p-3" style={{ borderTop: `1px solid ${T.border}` }}>
             <div className="flex items-center gap-1.5 mb-2">
               <Zap size={11} style={{ color: T.gold }} />
-              <span className="text-xs font-bold tracking-widest uppercase" style={{ color: T.gold }}>Steel Routes</span>
+              <span className="text-xs font-bold tracking-widest uppercase" style={{ color: T.gold }}>Network</span>
             </div>
             <div className="space-y-1.5">
               {[
-                { ...(vendors.find(v => v.id === 5) || FALLBACK_VENDORS.find(v => v.id === 5)), isActive: true },
-                { name: "TataSteel India",  flag: "🇮🇳", risk: 29, leadTime: 24, costDelta: 4, tier: "green" },
-                { name: "CSN Brazil",       flag: "🇧🇷", risk: 22, leadTime: 31, costDelta: 2, tier: "green" },
-              ].map((v, i) => (
-                <div key={i} className="flex items-center gap-2 p-2 rounded-lg" style={{ background: T.panel, border: `1px solid ${i === 0 ? `${T.red}30` : `${T.green}25`}` }}>
-                  <span className="text-sm">{v.flag}</span>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-xs font-medium truncate" style={{ color: T.text }}>{v.name || v.country}</div>
-                    <div className="text-xs font-mono" style={{ color: TIER_COLOR[v.tier] }}>Risk {v.risk}</div>
-                  </div>
-                  <span className="text-xs font-bold" style={{ color: i === 0 ? T.red : T.green }}>{i === 0 ? "Active" : "Alt"}</span>
+                { label: "Ports", value: ports.length, color: T.gold },
+                { label: "Routes", value: routes.length, color: T.yellow },
+                { label: "Alerts", value: alerts.length, color: T.red },
+              ].map((item) => (
+                <div key={item.label} className="flex items-center justify-between gap-2 p-2 rounded-lg" style={{ background: T.panel, border: `1px solid ${T.border}` }}>
+                  <span className="text-xs font-medium" style={{ color: T.text }}>{item.label}</span>
+                  <span className="text-xs font-bold mono" style={{ color: item.color }}>{item.value.toLocaleString()}</span>
                 </div>
               ))}
             </div>
-            <button className="mt-2 w-full py-2 rounded-lg text-xs font-bold transition-all hover:opacity-90" style={{ background: T.gold, color: "#0e0b07" }}>
-              Full Report
-            </button>
           </div>
         </div>
 
         {/* ── GLOBE ── */}
         <div className="flex-1 relative">
-          <GlobeScene vendors={vendors} ports={ports} selectedVendor={selectedVendor} onSelectVendor={handleSelectVendor} />
+          <GlobeScene
+            vendors={vendors}
+            ports={ports}
+            routes={routes}
+            routeColorMode={routeColorMode}
+            selectedVendor={selectedVendor}
+            onSelectVendor={handleSelectVendor}
+          />
 
           <div className="absolute top-3 left-3 z-10 rounded px-2 py-1 text-xs mono" style={{ background: "rgba(14,11,7,0.85)", color: T.gold, border: `1px solid ${T.borderHi}` }}>
             {ports.length.toLocaleString()} Ports
+          </div>
+          <div className="absolute top-3 left-32 z-10 rounded px-2 py-1 text-xs mono" style={{ background: "rgba(14,11,7,0.85)", color: T.gold, border: `1px solid ${T.borderHi}` }}>
+            {routes.length.toLocaleString()} Routes
+          </div>
+          <div className="absolute top-3 left-60 z-10 rounded p-0.5 text-xs" style={{ background: "rgba(14,11,7,0.9)", border: `1px solid ${T.borderHi}` }}>
+            <div className="flex">
+              <button
+                onClick={() => setRouteColorMode("lane")}
+                className="px-2 py-1 rounded text-xs font-semibold transition-all"
+                style={{
+                  color: routeColorMode === "lane" ? "#0e0b07" : T.textDim,
+                  background: routeColorMode === "lane" ? T.gold : "transparent",
+                }}
+              >
+                Lane Type
+              </button>
+              <button
+                onClick={() => setRouteColorMode("distinct")}
+                className="px-2 py-1 rounded text-xs font-semibold transition-all"
+                style={{
+                  color: routeColorMode === "distinct" ? "#0e0b07" : T.textDim,
+                  background: routeColorMode === "distinct" ? T.gold : "transparent",
+                }}
+              >
+                Distinct
+              </button>
+            </div>
           </div>
 
           {/* Legend */}

@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "node --watch server.mjs",
     "start": "node server.mjs",
-    "check:supabase": "node check-supabase.mjs"
+    "check:supabase": "node check-supabase.mjs",
+    "import:routes": "node import-routes.mjs",
+    "import:routes:replace": "node import-routes.mjs --replace"
   },
   "dependencies": {
     "cors": "^2.8.5",

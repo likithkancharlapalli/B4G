@@ -23,3 +23,7 @@ export async function getDashboard() {
 export async function getPorts() {
   return requestJson("/api/ports");
 }
+
+export async function getRoutes() {
+  return requestJson("/api/routes");
+}
