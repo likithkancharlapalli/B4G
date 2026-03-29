@@ -5,13 +5,16 @@
   "scripts": {
     "dev": "node --watch server.mjs",
     "start": "node server.mjs",
+    "test": "node --test",
     "check:supabase": "node check-supabase.mjs",
     "import:routes": "node import-routes.mjs",
-    "import:routes:replace": "node import-routes.mjs --replace"
+    "import:routes:replace": "node import-routes.mjs --replace",
+    "ingest:news": "node news-risk-ingest.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.21.2",
+    "fast-xml-parser": "^4.5.3",
     "@supabase/supabase-js": "^2.49.1",
     "dotenv": "^16.4.7"
   }

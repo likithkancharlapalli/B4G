@@ -4,7 +4,26 @@ import "@fontsource/rajdhani/700.css";
 import "@fontsource/share-tech-mono/400.css";
 import * as THREE from "three";
 import { AlertTriangle, Bell, ChevronRight, X, TrendingUp, Clock, DollarSign, Globe, BarChart2, Zap, RefreshCw, Radio, Shield } from "lucide-react";
-import { getAlerts, getPorts, getRoutes, getVendors } from "./lib/api";
+import {
+  getAlerts,
+  getNewsRiskStatus,
+  getPorts,
+  getRouteRiskHistory,
+  getRoutes,
+  getVendors,
+  triggerNewsIngest,
+} from "./lib/api";
+import RoutesPanel from "./components/RoutesPanel";
+import AlertsPanel from "./components/AlertsPanel";
+import RouteDetailPanel from "./components/RouteDetailPanel";
+import type {
+  AlertItem,
+  JobRunStatus,
+  NewsRiskStatusResponse,
+  RouteItem,
+  RouteRiskHistoryPoint,
+  ThemeColors,
+} from "./types/risk";
 
 // ─── DATA ────────────────────────────────────────────────────────────────────
 
@@ -12,7 +31,7 @@ const HQ = { name: "HQ — New York", lat: 40.7128, lng: -74.006 };
 
 // ─── THEME ───────────────────────────────────────────────────────────────────
 
-const T = {
+const T: ThemeColors = {
   bg:       "#0e0b07",
   surface:  "#161009",
   panel:    "#1a1208",
@@ -33,7 +52,8 @@ const TIER_COLOR = { red: T.red, yellow: T.yellow, green: T.green };
 const TIER_LABEL = { red: "Critical", yellow: "Caution", green: "Stable" };
 const ROUTE_BASE_HUE = { Major: 38, Intermediate: 202, Minor: 132 };
 const ROUTE_LANE_COLOR = { Major: "#ffc54d", Intermediate: "#5ec2ff", Minor: "#8fff9f" };
-const ROUTES_PAGE_SIZE = 9;
+const ROUTES_PAGE_SIZE = 5;
+const ALERTS_PAGE_SIZE = 5;
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 
@@ -83,9 +103,40 @@ function routeAltitude(route) {
   return 1.013 + (seed % 7) * 0.0032;
 }
 
+function formatRelativeTime(isoString) {
+  if (!isoString) return "";
+  const ts = new Date(isoString).getTime();
+  if (Number.isNaN(ts)) return "";
+  const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (diffSec < 60) return "just now";
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDay = Math.floor(diffHr / 24);
+  return `${diffDay}d ago`;
+}
+
+function hoursSince(isoString) {
+  if (!isoString) return null;
+  const ts = new Date(isoString).getTime();
+  if (Number.isNaN(ts)) return null;
+  return (Date.now() - ts) / (1000 * 60 * 60);
+}
+
 // ─── GLOBE ───────────────────────────────────────────────────────────────────
 
-function GlobeScene({ vendors, ports, routes, routeColorMode, selectedVendor, selectedRoute, onSelectVendor }) {
+function GlobeScene({
+  vendors,
+  ports,
+  routes,
+  routeColorMode,
+  selectedVendor,
+  selectedRoute,
+  highlightedRecommendedPoints,
+  selectedRoutePortFocus,
+  onSelectVendor,
+}) {
   const mountRef = useRef(null);
   const animFrameRef = useRef(null);
   const isDragging = useRef(false);
@@ -95,6 +146,7 @@ function GlobeScene({ vendors, ports, routes, routeColorMode, selectedVendor, se
   const globeRef = useRef(null);
   const targetRotationRef = useRef({ x: null, y: null });
   const markerMeshes = useRef([]);
+  const routeEndpointMarkersRef = useRef({ origin: null, destination: null });
 
   useEffect(() => {
     const el = mountRef.current;
@@ -174,6 +226,83 @@ function GlobeScene({ vendors, ports, routes, routeColorMode, selectedVendor, se
       routeLine.renderOrder = 3;
       globe.add(routeLine);
     });
+
+    if (Array.isArray(highlightedRecommendedPoints) && highlightedRecommendedPoints.length >= 2) {
+      const recommendedPoints = highlightedRecommendedPoints
+        .map((point) => latLngToVec3(point.lat, point.lng, 1.03))
+        .filter(Boolean);
+      if (recommendedPoints.length >= 2) {
+        const recommendedMat = new THREE.LineDashedMaterial({
+          color: 0x3bc15e,
+          transparent: true,
+          opacity: 1,
+          depthTest: true,
+          dashSize: 0.04,
+          gapSize: 0.02,
+        });
+        const recommendedLine = new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints(recommendedPoints),
+          recommendedMat,
+        );
+        recommendedLine.computeLineDistances();
+        recommendedLine.renderOrder = 8;
+        globe.add(recommendedLine);
+
+        const first = highlightedRecommendedPoints[0];
+        const last = highlightedRecommendedPoints[highlightedRecommendedPoints.length - 1];
+        const firstPos = latLngToVec3(first.lat, first.lng, 1.03);
+        const lastPos = latLngToVec3(last.lat, last.lng, 1.03);
+        const markerMaterial = new THREE.MeshBasicMaterial({ color: 0x3bc15e, transparent: true, opacity: 1 });
+        const startMarker = new THREE.Mesh(new THREE.SphereGeometry(0.018, 18, 18), markerMaterial);
+        startMarker.position.copy(firstPos);
+        startMarker.renderOrder = 8;
+        globe.add(startMarker);
+        const endMarker = new THREE.Mesh(new THREE.SphereGeometry(0.018, 18, 18), markerMaterial);
+        endMarker.position.copy(lastPos);
+        endMarker.renderOrder = 8;
+        globe.add(endMarker);
+      }
+    }
+
+    if (selectedRoute && Array.isArray(selectedRoute.points) && selectedRoute.points.length >= 2) {
+      const first = selectedRoute.points[0];
+      const last = selectedRoute.points[selectedRoute.points.length - 1];
+      const originPos = latLngToVec3(first.lat, first.lng, 1.02);
+      const destinationPos = latLngToVec3(last.lat, last.lng, 1.02);
+
+      const originActive = selectedRoutePortFocus === null || selectedRoutePortFocus === "origin";
+      const destinationActive =
+        selectedRoutePortFocus === null || selectedRoutePortFocus === "destination";
+
+      const originMarker = new THREE.Mesh(
+        new THREE.SphereGeometry(0.02, 18, 18),
+        new THREE.MeshBasicMaterial({
+          color: 0x66d9ff,
+          transparent: true,
+          opacity: originActive ? 1 : 0.35,
+        }),
+      );
+      originMarker.position.copy(originPos);
+      originMarker.renderOrder = 7;
+      globe.add(originMarker);
+      routeEndpointMarkersRef.current.origin = originMarker;
+
+      const destinationMarker = new THREE.Mesh(
+        new THREE.SphereGeometry(0.02, 18, 18),
+        new THREE.MeshBasicMaterial({
+          color: 0xff8ac6,
+          transparent: true,
+          opacity: destinationActive ? 1 : 0.35,
+        }),
+      );
+      destinationMarker.position.copy(destinationPos);
+      destinationMarker.renderOrder = 7;
+      globe.add(destinationMarker);
+      routeEndpointMarkersRef.current.destination = destinationMarker;
+    } else {
+      routeEndpointMarkersRef.current.origin = null;
+      routeEndpointMarkersRef.current.destination = null;
+    }
 
     // Ports cloud (lightweight points for thousands of records)
     if (ports.length > 0) {
@@ -299,7 +428,27 @@ function GlobeScene({ vendors, ports, routes, routeColorMode, selectedVendor, se
       if (focusTimeoutRef.current) clearTimeout(focusTimeoutRef.current);
       if (el.contains(renderer.domElement)) el.removeChild(renderer.domElement);
     };
-  }, [vendors, ports, routes, routeColorMode, selectedRoute, onSelectVendor]);
+  }, [
+    vendors,
+    ports,
+    routes,
+    routeColorMode,
+    selectedRoute,
+    highlightedRecommendedPoints,
+    onSelectVendor,
+  ]);
+
+  useEffect(() => {
+    const originMarker = routeEndpointMarkersRef.current.origin;
+    const destinationMarker = routeEndpointMarkersRef.current.destination;
+    if (!originMarker || !destinationMarker) return;
+
+    const originActive = selectedRoutePortFocus === null || selectedRoutePortFocus === "origin";
+    const destinationActive =
+      selectedRoutePortFocus === null || selectedRoutePortFocus === "destination";
+    originMarker.material.opacity = originActive ? 1 : 0.35;
+    destinationMarker.material.opacity = destinationActive ? 1 : 0.35;
+  }, [selectedRoutePortFocus]);
 
   useEffect(() => {
     markerMeshes.current.forEach(m => {
@@ -375,7 +524,7 @@ function TierBadge({ tier }) {
 
 // ─── DRAWER ──────────────────────────────────────────────────────────────────
 
-function VendorDrawer({ vendor, onClose }) {
+function VendorDrawer({ vendor, onClose, onGenerateReport, onSwitchBest }) {
   if (!vendor) return null;
   const altList = (Array.isArray(vendor.alternatives) ? vendor.alternatives : [])
     .map((alt) => (typeof alt === "object" && alt ? alt : null))
@@ -460,10 +609,18 @@ function VendorDrawer({ vendor, onClose }) {
 
       {/* CTAs */}
       <div className="p-4 space-y-2" style={{ borderTop: `1px solid ${T.border}` }}>
-        <button className="w-full py-2.5 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all hover:opacity-90" style={{ background: T.gold, color: "#0e0b07" }}>
+        <button
+          onClick={() => onGenerateReport?.(vendor)}
+          className="w-full py-2.5 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all hover:opacity-90"
+          style={{ background: T.gold, color: "#0e0b07" }}
+        >
           <Zap size={14} /> Generate AI Report
         </button>
-        <button className="w-full py-2.5 rounded-lg text-sm font-semibold flex items-center justify-center gap-2 transition-all hover:bg-white/5" style={{ color: T.green, border: `1px solid ${T.green}40` }}>
+        <button
+          onClick={() => onSwitchBest?.(vendor, best)}
+          className="w-full py-2.5 rounded-lg text-sm font-semibold flex items-center justify-center gap-2 transition-all hover:bg-white/5"
+          style={{ color: T.green, border: `1px solid ${T.green}40` }}
+        >
           <RefreshCw size={14} /> Switch to Best Vendor
         </button>
       </div>
@@ -474,104 +631,303 @@ function VendorDrawer({ vendor, onClose }) {
 // ─── MAIN APP ────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [vendors, setVendors] = useState([]);
-  const [alerts, setAlerts] = useState([]);
-  const [ports, setPorts] = useState([]);
-  const [routes, setRoutes] = useState([]);
-  const [selectedRouteId, setSelectedRouteId] = useState(null);
+  const [vendors, setVendors] = useState<any[]>([]);
+  const [alerts, setAlerts] = useState<AlertItem[]>([]);
+  const [ports, setPorts] = useState<any[]>([]);
+  const [routes, setRoutes] = useState<RouteItem[]>([]);
+  const [selectedRouteId, setSelectedRouteId] = useState<number | null>(null);
+  const [selectedRoutePortFocus, setSelectedRoutePortFocus] = useState<"origin" | "destination" | null>(null);
+  const [highlightedRecommendedRouteId, setHighlightedRecommendedRouteId] = useState<number | null>(null);
   const [routePage, setRoutePage] = useState(0);
+  const [alertPage, setAlertPage] = useState(0);
+  const [routeLaneFilter, setRouteLaneFilter] = useState("all");
+  const [routeMinRiskFilter, setRouteMinRiskFilter] = useState(0);
+  const [routeRecencyHours, setRouteRecencyHours] = useState(0);
+  const [routeSearch, setRouteSearch] = useState("");
   const [routeColorMode, setRouteColorMode] = useState("distinct");
   const [apiConnected, setApiConnected] = useState(false);
-  const [selectedVendor, setSelectedVendor] = useState(null);
-  const [drawerVendor, setDrawerVendor] = useState(null);
+  const [newsStatus, setNewsStatus] = useState<JobRunStatus | null>(null);
+  const [riskHistoryByRoute, setRiskHistoryByRoute] = useState<Record<string, RouteRiskHistoryPoint[]>>({});
+  const [selectedVendor, setSelectedVendor] = useState<number | null>(null);
+  const [drawerVendor, setDrawerVendor] = useState<any | null>(null);
   const [activeTab, setActiveTab] = useState("routes");
+  const [newsStatusLoading, setNewsStatusLoading] = useState(false);
+  const [newsStatusError, setNewsStatusError] = useState<string | null>(null);
+  const [routesLoading, setRoutesLoading] = useState(false);
+  const [routesError, setRoutesError] = useState<string | null>(null);
+  const [ingestInFlight, setIngestInFlight] = useState(false);
+
+  const loadFromApi = useCallback(async () => {
+    setRoutesLoading(true);
+    setRoutesError(null);
+    setNewsStatusLoading(true);
+    setNewsStatusError(null);
+
+    try {
+      const [
+        vendorsResult,
+        alertsResult,
+        portsResult,
+        routesResult,
+        newsStatusResult,
+      ] = await Promise.allSettled([
+        getVendors(),
+        getAlerts(),
+        getPorts(),
+        getRoutes(),
+        getNewsRiskStatus(),
+      ]);
+
+      let successfulCalls = 0;
+
+      if (vendorsResult.status === "fulfilled") {
+        successfulCalls += 1;
+        if (Array.isArray(vendorsResult.value)) {
+          setVendors(vendorsResult.value);
+        }
+      } else {
+        console.warn("[API] Vendors unavailable:", vendorsResult.reason);
+      }
+
+      if (alertsResult.status === "fulfilled") {
+        successfulCalls += 1;
+        if (Array.isArray(alertsResult.value)) {
+          setAlerts(alertsResult.value);
+        }
+      } else {
+        console.warn("[API] Alerts unavailable:", alertsResult.reason);
+      }
+
+      if (portsResult.status === "fulfilled") {
+        successfulCalls += 1;
+        if (Array.isArray(portsResult.value)) {
+          setPorts(portsResult.value);
+        }
+      } else {
+        console.warn("[API] Ports unavailable:", portsResult.reason);
+      }
+
+      if (routesResult.status === "fulfilled") {
+        successfulCalls += 1;
+        if (Array.isArray(routesResult.value)) {
+          setRoutes(routesResult.value as RouteItem[]);
+        } else {
+          setRoutesError("Routes payload was invalid.");
+        }
+      } else {
+        setRoutesError("Routes unavailable. Check backend routes API.");
+        console.warn("[API] Routes unavailable:", routesResult.reason);
+      }
+
+      if (newsStatusResult.status === "fulfilled") {
+        successfulCalls += 1;
+        const payload = newsStatusResult.value as NewsRiskStatusResponse;
+        setNewsStatus(payload?.latestRun ?? null);
+      } else {
+        setNewsStatusError("AI status unavailable.");
+        console.warn("[API] News status unavailable:", newsStatusResult.reason);
+      }
+
+      setApiConnected(successfulCalls > 0);
+    } catch (error) {
+      setApiConnected(false);
+      setRoutesError("Failed to load API data.");
+      setNewsStatusError("Failed to load AI status.");
+      console.warn("[API] Failed to load data:", error);
+    } finally {
+      setRoutesLoading(false);
+      setNewsStatusLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    let alive = true;
+    loadFromApi();
+  }, [loadFromApi]);
 
-    async function loadFromApi() {
+  useEffect(() => {
+    let active = true;
+    async function refreshNewsStatus() {
       try {
-        const [vendorsResult, alertsResult, portsResult, routesResult] = await Promise.allSettled([
-          getVendors(),
-          getAlerts(),
-          getPorts(),
-          getRoutes(),
-        ]);
-
-        if (!alive) return;
-        let successfulCalls = 0;
-
-        if (vendorsResult.status === "fulfilled") {
-          successfulCalls += 1;
-          if (Array.isArray(vendorsResult.value)) {
-            setVendors(vendorsResult.value);
-          }
-        } else {
-          console.warn("[API] Vendors unavailable:", vendorsResult.reason);
+        setNewsStatusLoading(true);
+        const result = await getNewsRiskStatus();
+        if (active) {
+          setNewsStatus(result?.latestRun ?? null);
+          setNewsStatusError(null);
         }
-
-        if (alertsResult.status === "fulfilled") {
-          successfulCalls += 1;
-          if (Array.isArray(alertsResult.value)) {
-            setAlerts(alertsResult.value);
-          }
-        } else {
-          console.warn("[API] Alerts unavailable:", alertsResult.reason);
-        }
-
-        if (portsResult.status === "fulfilled") {
-          successfulCalls += 1;
-          if (Array.isArray(portsResult.value)) {
-            setPorts(portsResult.value);
-          }
-        } else {
-          console.warn("[API] Ports unavailable:", portsResult.reason);
-        }
-
-        if (routesResult.status === "fulfilled") {
-          successfulCalls += 1;
-          if (Array.isArray(routesResult.value)) {
-            setRoutes(routesResult.value);
-          }
-        } else {
-          console.warn("[API] Routes unavailable:", routesResult.reason);
-        }
-
-        setApiConnected(successfulCalls > 0);
-      } catch (error) {
-        if (alive) {
-          setApiConnected(false);
-          console.warn("[API] Failed to load data:", error);
-        }
+      } catch {
+        if (active) setNewsStatusError("AI status polling failed.");
+      } finally {
+        if (active) setNewsStatusLoading(false);
       }
     }
-
-    loadFromApi();
-
+    const timer = setInterval(refreshNewsStatus, 60 * 1000);
     return () => {
-      alive = false;
+      active = false;
+      clearInterval(timer);
     };
   }, []);
+
+  useEffect(() => {
+    if (!selectedRouteId) return;
+    const key = String(selectedRouteId);
+    if (Array.isArray(riskHistoryByRoute[key]) && riskHistoryByRoute[key].length > 0) return;
+
+    let active = true;
+    async function loadHistory() {
+      try {
+        const history = await getRouteRiskHistory(selectedRouteId, 30);
+        if (!active) return;
+        setRiskHistoryByRoute((prev) => ({
+          ...prev,
+          [key]: Array.isArray(history) ? history : [],
+        }));
+      } catch {
+        if (!active) return;
+        setRiskHistoryByRoute((prev) => ({ ...prev, [key]: [] }));
+      }
+    }
+    loadHistory();
+
+    return () => {
+      active = false;
+    };
+  }, [selectedRouteId]);
+
+  useEffect(() => {
+    setSelectedRoutePortFocus(null);
+  }, [selectedRouteId]);
 
   const handleSelectVendor = useCallback((id) => setSelectedVendor(id), []);
   const openDrawer = (v) => setDrawerVendor(v);
   const closeDrawer = () => setDrawerVendor(null);
-  const handleAlertClick = (a) => {
+  const handleAlertClick = (a: AlertItem) => {
+    if (a.routeId) {
+      setSelectedRouteId(a.routeId);
+      setActiveTab("routes");
+      return;
+    }
     const v = vendors.find((vendor) => vendor.id === a.vendorId);
     if (v) setSelectedVendor(v.id);
   };
+  const handleGenerateVendorReport = (vendor) => {
+    setSelectedVendor(vendor.id);
+    setActiveTab("routes");
+    closeDrawer();
+  };
+  const handleSwitchToBestVendor = (vendor, bestAlternative) => {
+    if (!bestAlternative) return;
+    const matched = vendors.find(
+      (v) =>
+        v.name === bestAlternative.name &&
+        v.country === bestAlternative.country,
+    );
+    if (matched) {
+      setSelectedVendor(matched.id);
+      closeDrawer();
+      return;
+    }
+    setDrawerVendor({
+      ...vendor,
+      ...bestAlternative,
+      alternatives: vendor.alternatives,
+    });
+  };
 
-  const criticalCount = vendors.filter((v) => v.tier === "red").length;
-  const cautionCount = vendors.filter((v) => v.tier === "yellow").length;
-  const stableCount = vendors.filter((v) => v.tier === "green").length;
-  const totalExposure = vendors
-    .filter((v) => v.tier === "red")
-    .reduce((a, v) => a + v.costDelta * 80000, 0);
+  const handleRefreshIntelligence = async () => {
+    const token = import.meta.env.VITE_NEWS_JOB_TOKEN?.trim();
+    if (!token) {
+      setNewsStatusError("Set VITE_NEWS_JOB_TOKEN in frontend env to trigger ingest.");
+      return;
+    }
+    try {
+      setIngestInFlight(true);
+      setNewsStatusError(null);
+      await triggerNewsIngest(token);
+      await loadFromApi();
+    } catch (error) {
+      setNewsStatusError(error instanceof Error ? error.message : "Failed to trigger AI ingest.");
+    } finally {
+      setIngestInFlight(false);
+    }
+  };
+
+  const criticalRouteCount = routes.filter(
+    (route) => Number(route.riskPercentage ?? 0) >= 70,
+  ).length;
+  const cautionRouteCount = routes.filter((route) => {
+    const risk = Number(route.riskPercentage ?? 0);
+    return risk >= 40 && risk < 70;
+  }).length;
+  const optimalRouteCount = routes.filter(
+    (route) => Number(route.riskPercentage ?? 0) < 40,
+  ).length;
   const selV = vendors.find((v) => v.id === selectedVendor);
   const selectedRoute = routes.find((route) => route.id === selectedRouteId) || null;
-  const routesByRisk = [...routes].sort(
-    (a, b) => (b.riskPercentage ?? -1) - (a.riskPercentage ?? -1),
+  const highlightedRecommendedRoute =
+    routes.find((route) => route.id === highlightedRecommendedRouteId) || null;
+  const highlightedRecommendedPoints =
+    highlightedRecommendedRoute?.points ??
+    (selectedRoute?.recommendedRoute?.routeId === highlightedRecommendedRouteId
+      ? selectedRoute?.recommendedRoute?.points
+      : null);
+  const lastAiUpdatedAgo = formatRelativeTime(newsStatus?.startedAt);
+  const aiRunHoursAgo = hoursSince(newsStatus?.startedAt);
+  const aiIsStale =
+    Boolean(newsStatus?.stale) ||
+    (Number.isFinite(aiRunHoursAgo) && aiRunHoursAgo > Number(newsStatus?.staleThresholdHours ?? 8));
+  const routeRiskAlerts = routes
+    .flatMap((route) => {
+      const delta = Number(route.riskDelta ?? 0);
+      const drivers = Array.isArray(route.riskDrivers) ? route.riskDrivers : [];
+      if (Math.abs(delta) <= 0.01 || drivers.length === 0) return [];
+
+      return drivers.slice(0, 3).map((driver, idx) => {
+        const severity = Number(driver.severity ?? 0);
+        const tier = severity >= 4 ? "red" : severity >= 2 ? "yellow" : "green";
+        return {
+          id: `${route.id}-driver-${idx}`,
+          routeId: route.id,
+          tier,
+          region: route.routeName ?? `Route ${route.laneId}-${route.id}`,
+          msg: driver.title ?? driver.reason ?? "Route risk adjusted from recent news",
+          time: formatRelativeTime(driver.publishedAt) || "recent",
+          url: driver.url ?? null,
+          publishedTs: driver.publishedAt ? new Date(driver.publishedAt).getTime() : 0,
+        };
+      });
+    })
+    .sort((a, b) => (b.publishedTs ?? 0) - (a.publishedTs ?? 0));
+  const sidebarAlerts = routeRiskAlerts.length > 0 ? routeRiskAlerts : alerts;
+  const totalAlertPages = Math.max(
+    1,
+    Math.ceil(sidebarAlerts.length / ALERTS_PAGE_SIZE),
   );
+  const currentAlertPage = Math.min(alertPage, totalAlertPages - 1);
+  const alertStartIndex = currentAlertPage * ALERTS_PAGE_SIZE;
+  const alertEndIndex = Math.min(
+    alertStartIndex + ALERTS_PAGE_SIZE,
+    sidebarAlerts.length,
+  );
+  const pagedAlerts = sidebarAlerts.slice(alertStartIndex, alertEndIndex);
+  const routesByRisk = [...routes]
+    .filter((route) => {
+      if (routeLaneFilter !== "all" && route.laneType !== routeLaneFilter) return false;
+      if (Number(route.riskPercentage ?? 0) < routeMinRiskFilter) return false;
+      if (routeRecencyHours > 0) {
+        const updatedTs = new Date(route.riskSnapshotAt ?? "").getTime();
+        if (!Number.isFinite(updatedTs)) return false;
+        const ageHours = (Date.now() - updatedTs) / (1000 * 60 * 60);
+        if (ageHours > routeRecencyHours) return false;
+      }
+      if (routeSearch.trim()) {
+        const haystack = `${route.routeName ?? ""} ${route.originPortName ?? ""} ${route.destPortName ?? ""}`.toLowerCase();
+        if (!haystack.includes(routeSearch.trim().toLowerCase())) return false;
+      }
+      return true;
+    })
+    .sort(
+    (a, b) => (b.riskPercentage ?? -1) - (a.riskPercentage ?? -1),
+    );
   const totalRoutePages = Math.max(
     1,
     Math.ceil(routesByRisk.length / ROUTES_PAGE_SIZE),
@@ -587,6 +943,10 @@ export default function App() {
   useEffect(() => {
     setRoutePage((p) => Math.min(p, totalRoutePages - 1));
   }, [totalRoutePages]);
+
+  useEffect(() => {
+    setAlertPage((p) => Math.min(p, totalAlertPages - 1));
+  }, [totalAlertPages]);
 
   return (
     <div className="min-h-screen flex flex-col" style={{ background: T.bg, fontFamily: "'Rajdhani', 'Segoe UI', sans-serif", color: T.text }}>
@@ -609,15 +969,19 @@ export default function App() {
           <span className="font-bold text-base heading" style={{ color: T.text }}>
             Supply<span style={{ color: T.gold }}>Watch</span>
           </span>
-          <span className="text-xs ml-1 px-1.5 py-0.5 rounded font-mono" style={{ background: T.goldFaint, color: T.goldDim, border: `1px solid ${T.border}` }}>BETA</span>
         </div>
 
         <div className="flex items-center gap-0.5">
-          {["Dashboard", "Routes", "Vendors", "Reports", "Alerts"].map(nav => (
-            <button key={nav} className="px-3 py-1 text-xs rounded transition-all font-medium" style={{ color: nav === "Dashboard" ? T.gold : T.textDim, background: nav === "Dashboard" ? T.goldFaint : "transparent" }}>
+          {["Routes", "Alerts", "Risk"].map((nav) => {
+            const isActive =
+              (nav === "Routes" && activeTab === "routes") ||
+              (nav === "Alerts" && activeTab === "alerts") ||
+              (nav === "Risk" && activeTab === "chart");
+            return (
+            <button key={nav} onClick={() => setActiveTab(nav === "Risk" ? "chart" : nav.toLowerCase())} className="px-3 py-1 text-xs rounded transition-all font-medium" style={{ color: isActive ? T.gold : T.textDim, background: isActive ? T.goldFaint : "transparent" }}>
               {nav}
             </button>
-          ))}
+          );})}
         </div>
 
         <div className="flex items-center gap-2">
@@ -628,11 +992,51 @@ export default function App() {
               {apiConnected ? "API LIVE" : "API OFFLINE"}
             </span>
           </div>
+          <div className="flex items-center gap-1.5 px-2 py-1 rounded" style={{ background: T.goldFaint, border: `1px solid ${T.border}` }}>
+            <div
+              className="w-1.5 h-1.5 rounded-full"
+              style={{
+                background: newsStatus?.status === "failed"
+                  ? T.red
+                  : aiIsStale
+                    ? T.yellow
+                    : T.green,
+              }}
+            />
+            <span
+              className="text-xs mono"
+              style={{
+                color: newsStatus?.status === "failed"
+                  ? T.red
+                  : aiIsStale
+                    ? T.yellow
+                    : T.green,
+              }}
+            >
+              {newsStatusLoading
+                ? "AI CHECKING..."
+                : newsStatus
+                ? `AI ${newsStatus.status.toUpperCase()}${lastAiUpdatedAgo ? ` · ${lastAiUpdatedAgo}` : ""}`
+                : "AI STATUS N/A"}
+            </span>
+          </div>
+          <button
+            onClick={handleRefreshIntelligence}
+            disabled={ingestInFlight}
+            className="px-2 py-1 rounded text-xs font-semibold transition-all"
+            style={{
+              color: ingestInFlight ? T.textDim : T.text,
+              border: `1px solid ${T.border}`,
+              opacity: ingestInFlight ? 0.6 : 1,
+            }}
+          >
+            {ingestInFlight ? "Refreshing..." : "Refresh Intelligence"}
+          </button>
           <button className="relative p-1.5 rounded hover:bg-white/5 transition-all">
             <Bell size={16} style={{ color: T.textDim }} />
-            {alerts.length > 0 && (
+            {sidebarAlerts.length > 0 && (
               <span className="absolute top-0.5 right-0.5 w-3.5 h-3.5 rounded-full text-white text-[9px] flex items-center justify-center font-bold" style={{ background: T.red }}>
-                {Math.min(alerts.length, 9)}
+                {Math.min(sidebarAlerts.length, 9)}
               </span>
             )}
           </button>
@@ -641,14 +1045,13 @@ export default function App() {
       </nav>
 
       {/* ── KPI STRIP ── */}
-      <div className="grid grid-cols-4" style={{ borderBottom: `1px solid ${T.border}`, background: T.surface }}>
+      <div className="grid grid-cols-3" style={{ borderBottom: `1px solid ${T.border}`, background: T.surface }}>
         {[
           { label: "Active Vendors",   value: vendors.length,                          icon: <Globe size={14} />,       color: T.gold, sub: "across 8 regions" },
-          { label: "Critical Routes",  value: criticalCount,                           icon: <AlertTriangle size={14}/>, color: T.red,  sub: `${cautionCount} on watch` },
+          { label: "Critical Routes",  value: criticalRouteCount,                      icon: <AlertTriangle size={14}/>, color: T.red,  sub: `${cautionRouteCount} on watch` },
           { label: "Active Routes",    value: routes.length,                            icon: <TrendingUp size={14} />,   color: T.yellow,sub: "tracked lanes" },
-          { label: "Cost Exposure",    value: `$${(totalExposure/1000000).toFixed(1)}M`,icon: <DollarSign size={14}/>,   color: T.red,  sub: "from vendor risks" },
         ].map((k, i) => (
-          <div key={k.label} className="flex items-center gap-3 px-5 py-3" style={{ borderRight: i < 3 ? `1px solid ${T.border}` : "none" }}>
+          <div key={k.label} className="flex items-center gap-3 px-5 py-3" style={{ borderRight: i < 2 ? `1px solid ${T.border}` : "none" }}>
             <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{ color: k.color, background: `${k.color}15` }}>{k.icon}</div>
             <div>
               <div className="font-bold text-lg leading-none mono" style={{ color: k.color }}>{k.value}</div>
@@ -671,109 +1074,103 @@ export default function App() {
               </button>
             ))}
           </div>
+          {aiIsStale && (
+            <div
+              className="px-3 py-2 text-xs"
+              style={{ color: T.yellow, background: `${T.yellow}14`, borderBottom: `1px solid ${T.border}` }}
+            >
+              AI risk data is stale. Last update {lastAiUpdatedAgo || "unknown"}.
+            </div>
+          )}
+          {newsStatus?.status === "failed" && (
+            <div
+              className="px-3 py-2 text-xs"
+              style={{ color: T.red, background: `${T.red}14`, borderBottom: `1px solid ${T.border}` }}
+            >
+              Last AI ingest failed. {newsStatus.errorText || "Check backend job logs."}
+            </div>
+          )}
+          {newsStatusError && (
+            <div
+              className="px-3 py-2 text-xs"
+              style={{ color: T.red, background: `${T.red}14`, borderBottom: `1px solid ${T.border}` }}
+            >
+              {newsStatusError}
+            </div>
+          )}
+          {routesError && (
+            <div
+              className="px-3 py-2 text-xs"
+              style={{ color: T.yellow, background: `${T.yellow}14`, borderBottom: `1px solid ${T.border}` }}
+            >
+              {routesError}
+            </div>
+          )}
 
           {/* Routes */}
           {activeTab === "routes" && (
-            <div className="flex-1 overflow-y-auto">
-              <div
-                className="px-3 py-2 flex items-center justify-between sticky top-0 z-10"
-                style={{ background: T.surface, borderBottom: `1px solid ${T.border}` }}
-              >
-                <span className="text-xs mono" style={{ color: T.textDim }}>
-                  {routesByRisk.length === 0
-                    ? "0 routes"
-                    : `${routeStartIndex + 1}-${routeEndIndex} of ${routesByRisk.length}`}
-                </span>
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={() => setRoutePage((p) => Math.max(0, p - 1))}
-                    disabled={currentRoutePage === 0}
-                    className="px-2 py-0.5 text-xs rounded"
-                    style={{
-                      color: currentRoutePage === 0 ? T.textDim : T.text,
-                      border: `1px solid ${T.border}`,
-                      opacity: currentRoutePage === 0 ? 0.45 : 1,
-                    }}
-                  >
-                    Prev
-                  </button>
-                  <button
-                    onClick={() =>
-                      setRoutePage((p) => Math.min(totalRoutePages - 1, p + 1))
-                    }
-                    disabled={currentRoutePage >= totalRoutePages - 1}
-                    className="px-2 py-0.5 text-xs rounded"
-                    style={{
-                      color: currentRoutePage >= totalRoutePages - 1 ? T.textDim : T.text,
-                      border: `1px solid ${T.border}`,
-                      opacity: currentRoutePage >= totalRoutePages - 1 ? 0.45 : 1,
-                    }}
-                  >
-                    Next
-                  </button>
-                </div>
-              </div>
-              {pagedRoutes.map((route) => {
-                const risk = Number.isFinite(route.riskPercentage)
-                  ? route.riskPercentage
-                  : null;
-                const riskColor = risk === null
-                  ? T.textDim
-                  : risk >= 70
-                    ? T.red
-                    : risk >= 40
-                      ? T.yellow
-                      : T.green;
-
-                return (
-                  <div
-                    key={route.id}
-                    onClick={() =>
-                      setSelectedRouteId((prev) =>
-                        prev === route.id ? null : route.id,
-                      )
-                    }
-                    className="flex items-center gap-2.5 px-3 py-2.5 cursor-pointer transition-all"
-                    style={{
-                      borderBottom: `1px solid ${T.border}`,
-                      background: selectedRouteId === route.id ? T.goldFaint : "transparent",
-                    }}
-                  >
-                    <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: riskColor }} />
-                    <div className="flex-1 min-w-0">
-                      <div className="text-xs font-semibold truncate" style={{ color: selectedRouteId === route.id ? T.gold : T.text }}>
-                        {route.routeName ?? `Route ${route.laneId}-${route.id}`}
-                      </div>
-                      <div className="text-xs truncate" style={{ color: T.textDim }}>
-                        {route.laneType} · {Number(route.distanceKm ?? 0).toFixed(1)} km
-                      </div>
-                    </div>
-                    <div className="text-right flex-shrink-0">
-                      <div className="text-xs font-bold mono" style={{ color: riskColor }}>
-                        {risk === null ? "N/A" : `${risk}%`}
-                      </div>
-                      <div className="text-xs mono" style={{ color: T.textDim }}>risk</div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+            <RoutesPanel
+              T={T}
+              routesByRisk={routesByRisk}
+              routeStartIndex={routeStartIndex}
+              routeEndIndex={routeEndIndex}
+              currentRoutePage={currentRoutePage}
+              totalRoutePages={totalRoutePages}
+              pagedRoutes={pagedRoutes}
+              selectedRouteId={selectedRouteId}
+              routeSearch={routeSearch}
+              routeLaneFilter={routeLaneFilter}
+              routeRecencyHours={routeRecencyHours}
+              routeMinRiskFilter={routeMinRiskFilter}
+              riskHistoryByRoute={riskHistoryByRoute}
+              formatRelativeTime={formatRelativeTime}
+              onPrevPage={() => setRoutePage((p) => Math.max(0, p - 1))}
+              onNextPage={() => setRoutePage((p) => Math.min(totalRoutePages - 1, p + 1))}
+              onSearchChange={(value) => {
+                setRoutePage(0);
+                setRouteSearch(value);
+              }}
+              onLaneFilterChange={(value) => {
+                setRoutePage(0);
+                setRouteLaneFilter(value);
+              }}
+              onRecencyChange={(value) => {
+                setRoutePage(0);
+                setRouteRecencyHours(value);
+              }}
+              onMinRiskChange={(value) => {
+                setRoutePage(0);
+                setRouteMinRiskFilter(value);
+              }}
+              onRouteClick={(routeId) => {
+                setSelectedRouteId((prev) => {
+                  if (prev === routeId) {
+                    setHighlightedRecommendedRouteId(null);
+                    return null;
+                  }
+                  const clicked = routes.find((route) => route.id === routeId);
+                  setHighlightedRecommendedRouteId(clicked?.recommendedRoute?.routeId ?? null);
+                  return routeId;
+                });
+              }}
+            />
           )}
 
           {/* Alerts */}
           {activeTab === "alerts" && (
-            <div className="flex-1 overflow-y-auto">
-              {alerts.map(a => (
-                <div key={a.id} onClick={() => handleAlertClick(a)} className="px-3 py-2.5 cursor-pointer transition-all hover:bg-white/5 flex gap-2" style={{ borderBottom: `1px solid ${T.border}` }}>
-                  <div className="w-1.5 h-1.5 rounded-full mt-1 flex-shrink-0" style={{ background: TIER_COLOR[a.tier] }} />
-                  <div className="flex-1 min-w-0">
-                    <div className="text-xs font-bold mb-0.5" style={{ color: TIER_COLOR[a.tier] }}>{a.region}</div>
-                    <div className="text-xs leading-snug" style={{ color: T.textMid }}>{a.msg}</div>
-                    <div className="text-xs mt-1" style={{ color: T.textDim }}>{a.time}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
+            <AlertsPanel
+              T={T}
+              TIER_COLOR={TIER_COLOR}
+              sidebarAlerts={sidebarAlerts}
+              pagedAlerts={pagedAlerts}
+              alertStartIndex={alertStartIndex}
+              alertEndIndex={alertEndIndex}
+              currentAlertPage={currentAlertPage}
+              totalAlertPages={totalAlertPages}
+              onPrevPage={() => setAlertPage((p) => Math.max(0, p - 1))}
+              onNextPage={() => setAlertPage((p) => Math.min(totalAlertPages - 1, p + 1))}
+              onAlertClick={handleAlertClick}
+            />
           )}
 
           {/* Chart */}
@@ -802,7 +1199,7 @@ export default function App() {
               {[
                 { label: "Ports", value: ports.length, color: T.gold },
                 { label: "Routes", value: routes.length, color: T.yellow },
-                { label: "Alerts", value: alerts.length, color: T.red },
+                { label: "Alerts", value: sidebarAlerts.length, color: T.red },
               ].map((item) => (
                 <div key={item.label} className="flex items-center justify-between gap-2 p-2 rounded-lg" style={{ background: T.panel, border: `1px solid ${T.border}` }}>
                   <span className="text-xs font-medium" style={{ color: T.text }}>{item.label}</span>
@@ -822,6 +1219,8 @@ export default function App() {
             routeColorMode={routeColorMode}
             selectedVendor={selectedVendor}
             selectedRoute={selectedRoute}
+            highlightedRecommendedPoints={highlightedRecommendedPoints}
+            selectedRoutePortFocus={selectedRoutePortFocus}
             onSelectVendor={handleSelectVendor}
           />
 
@@ -831,6 +1230,11 @@ export default function App() {
           <div className="absolute top-3 left-32 z-10 rounded px-2 py-1 text-xs mono" style={{ background: "rgba(14,11,7,0.85)", color: T.gold, border: `1px solid ${T.borderHi}` }}>
             {routes.length.toLocaleString()} Routes
           </div>
+          {routesLoading && (
+            <div className="absolute top-3 left-[13.5rem] z-10 rounded px-2 py-1 text-xs mono" style={{ background: "rgba(14,11,7,0.85)", color: T.yellow, border: `1px solid ${T.borderHi}` }}>
+              Loading routes...
+            </div>
+          )}
           <div className="absolute top-3 left-60 z-10 rounded p-0.5 text-xs" style={{ background: "rgba(14,11,7,0.9)", border: `1px solid ${T.borderHi}` }}>
             <div className="flex">
               <button
@@ -858,7 +1262,7 @@ export default function App() {
 
           {/* Legend */}
           <div className="absolute bottom-5 left-5 flex gap-3 z-10">
-            {[{ label: "Optimal", color: T.green, count: stableCount }, { label: "Caution", color: T.yellow, count: cautionCount }, { label: "Critical", color: T.red, count: criticalCount }].map(l => (
+            {[{ label: "Optimal", color: T.green, count: optimalRouteCount }, { label: "Caution", color: T.yellow, count: cautionRouteCount }, { label: "Critical", color: T.red, count: criticalRouteCount }].map(l => (
               <div key={l.label} className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-semibold" style={{ background: "rgba(14,11,7,0.85)", border: `1px solid ${l.color}35`, color: l.color, backdropFilter: "blur(8px)" }}>
                 <div className="w-1.5 h-1.5 rounded-full" style={{ background: l.color }} />
                 {l.count} {l.label}
@@ -892,6 +1296,22 @@ export default function App() {
               </button>
             </div>
           )}
+          {selectedRoute && (
+            <RouteDetailPanel
+              T={T}
+              route={selectedRoute}
+              history={riskHistoryByRoute[String(selectedRoute.id)] ?? []}
+              formatRelativeTime={formatRelativeTime}
+              selectedPortFocus={selectedRoutePortFocus}
+              onSelectPortFocus={setSelectedRoutePortFocus}
+              highlightedRecommendedRouteId={highlightedRecommendedRouteId}
+              onHighlightRecommendedRoute={(routeId) => setHighlightedRecommendedRouteId(routeId)}
+              onClose={() => {
+                setHighlightedRecommendedRouteId(null);
+                setSelectedRouteId(null);
+              }}
+            />
+          )}
         </div>
       </div>
 
@@ -899,7 +1319,12 @@ export default function App() {
       {drawerVendor && (
         <>
           <div className="fixed inset-0 z-40" style={{ background: "rgba(0,0,0,0.5)", backdropFilter: "blur(4px)" }} onClick={closeDrawer} />
-          <VendorDrawer vendor={drawerVendor} onClose={closeDrawer} />
+          <VendorDrawer
+            vendor={drawerVendor}
+            onClose={closeDrawer}
+            onGenerateReport={handleGenerateVendorReport}
+            onSwitchBest={handleSwitchToBestVendor}
+          />
         </>
       )}
     </div>
