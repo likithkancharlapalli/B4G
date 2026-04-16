@@ -4,7 +4,8 @@ import type {
   RouteRiskHistoryPoint,
 } from "../types/risk";
 
-const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "http://localhost:4000").trim();
+// const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "http://localhost:4000").trim();
+const apiBaseUrl = "https://supplywatch.vercel.app";
 
 async function requestJson(path: string) {
   const response = await fetch(`${apiBaseUrl}${path}`);
